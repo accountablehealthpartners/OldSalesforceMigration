@@ -1,0 +1,450 @@
+###### LOGGING IN TO SF REMOTELY #######
+
+
+
+import pandas as pd
+from simple_salesforce import Salesforce
+import requests
+import os
+import Salesforce_Credentials as creds
+
+# Authenticate to Salesforce Production
+oldsf = Salesforce(
+    username=creds.SF_USERNAME,
+    password=creds.SF_PASSWORD,
+    security_token=creds.SF_SECURITY_TOKEN,
+    domain='login'  # Use 'test' for sandbox and 'login' for production
+)
+
+sand = Salesforce(
+    username=creds.SAND_USERNAME,
+    password=creds.SAND_PASSWORD,
+    security_token=creds.SAND_SECURITY_TOKEN,
+    domain='test'  # Use 'test' for sandbox and 'login' for production
+)
+
+
+# Step 1: Retrieve ContentDocument and ContentVersion from oldsf
+content_documents = oldsf.query_all("SELECT Id, Title, LatestPublishedVersionId FROM ContentDocument")
+df_content_documents = pd.DataFrame(content_documents['records']).drop(columns='attributes')
+
+content_versions = oldsf.query_all("SELECT Id, ContentDocumentId, VersionData, Title FROM ContentVersion WHERE ContentDocumentId IN (SELECT Id FROM ContentDocument)")
+df_content_versions = pd.DataFrame(content_versions['records']).drop(columns='attributes')
+
+# Check retrieved data
+print("Retrieved ContentDocuments:", df_content_documents.head())
+print("Retrieved ContentVersions:", df_content_versions.head())
+
+
+
+
+
+  
+
+
+##### Downloading "Account" object attachements (documents, notes) with data behind them #######
+
+
+  
+download_dir = "C://Users//jkim436//Downloads//Old Salesforce Attachments"
+os.makedirs(download_dir, exist_ok=True)
+
+# Base URL of your Salesforce instance
+base_url = "https://ahpnetwork.my.salesforce.com"
+api_version = "v59.0"  # Ensure the API version matches your Salesforce environment
+
+# Step 2: Retrieve ContentDocumentLink records linked to Accounts
+query = """
+    SELECT ContentDocumentId, LinkedEntityId 
+    FROM ContentDocumentLink 
+    WHERE LinkedEntityId IN (SELECT Id FROM Account)
+"""
+content_doc_links = oldsf.query_all(query)
+df_content_doc_links = pd.DataFrame(content_doc_links['records']).drop(columns='attributes')
+
+# Retrieve unique ContentDocument IDs and their corresponding Account IDs
+content_document_links = df_content_doc_links[['ContentDocumentId', 'LinkedEntityId']].drop_duplicates()
+
+# Step 3: Retrieve ContentVersion records for each ContentDocument and download files
+for index, row in content_document_links.iterrows():
+    content_document_id = row['ContentDocumentId']
+    account_id = row['LinkedEntityId']
+    
+    # Query to get ContentVersion records for the ContentDocument, including FileExtension
+    content_versions = oldsf.query_all(f"""
+        SELECT Id, Title, VersionData, FileExtension 
+        FROM ContentVersion 
+        WHERE ContentDocumentId = '{content_document_id}'
+    """)
+    df_content_versions = pd.DataFrame(content_versions['records']).drop(columns='attributes')
+
+    # Step 4: Download each file, ensuring the correct file extension is used
+    for _, version_row in df_content_versions.iterrows():
+        content_version_id = version_row['Id']
+        file_title = version_row['Title']
+        file_extension = version_row['FileExtension']  # Get the correct file extension
+        version_data_path = f"/services/data/{api_version}/sobjects/ContentVersion/{content_version_id}/VersionData"
+        version_data_url = base_url + version_data_path
+
+        try:
+            # Download the file content
+            response = oldsf.session.get(version_data_url, headers={'Authorization': 'Bearer ' + oldsf.session_id})
+            response.raise_for_status()  # Raises an error for HTTP 4xx/5xx responses
+
+            # Modify the file title to include the AccountId and correct extension
+            file_base, _ = os.path.splitext(file_title)
+            file_title_with_account = f"{account_id}_{file_base}.{file_extension}"
+            file_path = os.path.join(download_dir, file_title_with_account)
+
+            # Handle duplicates by appending a counter
+            file_count = 1
+            while os.path.exists(file_path):
+                file_path = os.path.join(download_dir, f"{account_id}_{file_base}_{file_count}.{file_extension}")
+                file_count += 1
+
+            # Save the file locally with the correct extension
+            with open(file_path, 'wb') as file:
+                file.write(response.content)
+            print(f"Downloaded {file_title} as {file_title_with_account} to {file_path}")
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to download {file_title} from {version_data_url}: {e}")
+
+
+
+
+
+                                       
+
+                                       
+
+#### Downloading Notes Attached to "Contact" object records and data behind them ########
+
+                                       
+download_dir = "C://Users//jkim436//Downloads//Old Salesforce Notes"
+os.makedirs(download_dir, exist_ok=True)
+
+# Base URL of your Salesforce instance
+base_url = "https://ahpnetwork.my.salesforce.com"
+api_version = "v59.0"  # Ensure the API version matches your Salesforce environment
+
+# Step 2: Retrieve ContentDocumentLink records linked to Contacts
+query = """
+    SELECT ContentDocumentId, LinkedEntityId 
+    FROM ContentDocumentLink 
+    WHERE LinkedEntityId IN (SELECT Id FROM Contact)
+"""
+content_doc_links = oldsf.query_all(query)
+df_content_doc_links = pd.DataFrame(content_doc_links['records'])
+
+# Check if 'attributes' column exists and drop if present
+if 'attributes' in df_content_doc_links.columns:
+    df_content_doc_links = df_content_doc_links.drop(columns='attributes')
+
+# Retrieve unique ContentDocument IDs and their corresponding Contact IDs
+content_document_links = df_content_doc_links[['ContentDocumentId', 'LinkedEntityId']].drop_duplicates()
+
+# Step 3: Retrieve ContentVersion records for each ContentDocument with FileType 'SNOTE' and download notes
+for index, row in content_document_links.iterrows():
+    content_document_id = row['ContentDocumentId']
+    contact_id = row['LinkedEntityId']
+    
+    # Query to get ContentVersion records for ContentNotes associated with the ContentDocument
+    content_versions = oldsf.query_all(f"""
+        SELECT Id, Title, FileType, TextPreview, VersionData 
+        FROM ContentVersion 
+        WHERE ContentDocumentId = '{content_document_id}' AND FileType = 'SNOTE'
+    """)
+    df_content_versions = pd.DataFrame(content_versions['records'])
+
+    # Check if 'attributes' column exists and drop if present
+    if 'attributes' in df_content_versions.columns:
+        df_content_versions = df_content_versions.drop(columns='attributes')
+
+    # Step 4: Download each note, saving as a text file
+    for _, version_row in df_content_versions.iterrows():
+        note_id = version_row['Id']
+        note_title = version_row['Title']
+        note_text_preview = version_row['TextPreview']  # Preview text of the note
+        version_data_url = f"{base_url}/services/data/{api_version}/sobjects/ContentVersion/{note_id}/VersionData"
+
+        # Define file path and name, ensuring the correct text format is used
+        file_base = note_title.replace(' ', '_')  # Clean title for filename
+        file_title_with_contact = f"{contact_id}_{file_base}.txt"  # Save as .txt for simplicity
+        file_path = os.path.join(download_dir, file_title_with_contact)
+
+        # Handle duplicates by appending a counter
+        file_count = 1
+        while os.path.exists(file_path):
+            file_path = os.path.join(download_dir, f"{contact_id}_{file_base}_{file_count}.txt")
+            file_count += 1
+
+        # Save the note content locally as a text file
+        try:
+            # Download the file content using VersionData URL
+            response = oldsf.session.get(version_data_url, headers={'Authorization': 'Bearer ' + oldsf.session_id})
+            response.raise_for_status()  # Raises an error for HTTP 4xx/5xx responses
+            
+            # Save the note content from the response
+            with open(file_path, 'w', encoding='utf-8') as file:
+                file.write(response.text)  # Save the note content
+            print(f"Downloaded note {note_title} as {file_title_with_contact} to {file_path}")
+        except Exception as e:
+            print(f"Failed to save note {note_title}: {e}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### Downloading Attachments in Contact object records and the data behind them ######
+
+import pandas as pd
+import os
+import requests
+
+# Directory for saving the downloaded attachments
+download_dir = "C://Users//jkim436//Downloads//Old Salesforce Contact Attachments"
+os.makedirs(download_dir, exist_ok=True)
+
+# Base URL of your Salesforce instance
+base_url = "https://ahpnetwork.my.salesforce.com"
+api_version = "v59.0"  # Ensure the API version matches your Salesforce environment
+
+# Step 2: Retrieve ContentDocumentLink records linked to Contacts
+query = """
+    SELECT ContentDocumentId, LinkedEntityId 
+    FROM ContentDocumentLink 
+    WHERE LinkedEntityId IN (SELECT Id FROM Contact)
+"""
+content_doc_links = oldsf.query_all(query)
+df_content_doc_links = pd.DataFrame(content_doc_links['records'])
+
+# Drop the 'attributes' column if it exists
+if 'attributes' in df_content_doc_links.columns:
+    df_content_doc_links = df_content_doc_links.drop(columns='attributes')
+
+# Retrieve unique ContentDocument IDs and their corresponding Contact IDs
+content_document_links = df_content_doc_links[['ContentDocumentId', 'LinkedEntityId']].drop_duplicates()
+
+# Step 3: Retrieve ContentVersion records for each ContentDocument and download files
+for index, row in content_document_links.iterrows():
+    content_document_id = row['ContentDocumentId']
+    contact_id = row['LinkedEntityId']
+    
+    # Query to get ContentVersion records for the ContentDocument, excluding 'SNOTE' file types
+    content_versions = oldsf.query_all(f"""
+        SELECT Id, Title, VersionData, FileExtension, FileType
+        FROM ContentVersion 
+        WHERE ContentDocumentId = '{content_document_id}' AND FileType != 'SNOTE'
+    """)
+    df_content_versions = pd.DataFrame(content_versions['records'])
+
+    # Drop the 'attributes' column if it exists
+    if 'attributes' in df_content_versions.columns:
+        df_content_versions = df_content_versions.drop(columns='attributes')
+
+    # Step 4: Download each file, ensuring the correct file extension is used
+    for _, version_row in df_content_versions.iterrows():
+        content_version_id = version_row['Id']
+        file_title = version_row['Title']
+        file_extension = version_row['FileExtension']  # Get the correct file extension
+        version_data_path = f"/services/data/{api_version}/sobjects/ContentVersion/{content_version_id}/VersionData"
+        version_data_url = base_url + version_data_path
+
+        try:
+            # Download the file content
+            response = oldsf.session.get(version_data_url, headers={'Authorization': 'Bearer ' + oldsf.session_id})
+            response.raise_for_status()  # Raises an error for HTTP 4xx/5xx responses
+
+            # Modify the file title to include the ContactId and correct extension
+            file_base, _ = os.path.splitext(file_title)
+            file_title_with_contact = f"{contact_id}_{file_base}.{file_extension}"
+            file_path = os.path.join(download_dir, file_title_with_contact)
+
+            # Handle duplicates by appending a counter
+            file_count = 1
+            while os.path.exists(file_path):
+                file_path = os.path.join(download_dir, f"{contact_id}_{file_base}_{file_count}.{file_extension}")
+                file_count += 1
+
+            # Save the file locally with the correct extension
+            with open(file_path, 'wb') as file:
+                file.write(response.content)
+            print(f"Downloaded {file_title} as {file_title_with_contact} to {file_path}")
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to download {file_title} from {version_data_url}: {e}")
+
+
+
+
+
+
+
+
+
+                                       
+
+
+
+##### Downloading Attachements in objects that are neither Contact nor Account objects #####
+
+                                      
+
+
+                                       
+import pandas as pd
+import os
+import requests
+
+# Directory for saving all downloaded attachments and notes
+download_dir = "C://Users//jkim436//Downloads//All Attachments"
+os.makedirs(download_dir, exist_ok=True)
+
+# Base URL of your Salesforce instance
+base_url = "https://ahpnetwork.my.salesforce.com"
+api_version = "v59.0"  # Ensure the API version matches your Salesforce environment
+
+# Function to handle Salesforce query with pagination
+def query_salesforce(sf, soql):
+    records = []
+    result = sf.query_all(soql)
+    records.extend(result['records'])
+    while not result['done']:
+        next_url = result['nextRecordsUrl']
+        result = sf.session.get(f"{base_url}{next_url}", headers={'Authorization': 'Bearer ' + sf.session_id}).json()
+        records.extend(result['records'])
+    return records
+
+# Function to download files from ContentVersion
+def download_content_version():
+    query = """
+        SELECT Id, Title, VersionData, FileExtension, FileType, ContentDocumentId
+        FROM ContentVersion
+    """
+    content_versions = query_salesforce(oldsf, query)
+    df_content_versions = pd.DataFrame(content_versions)
+    if 'attributes' in df_content_versions.columns:
+        df_content_versions = df_content_versions.drop(columns='attributes')
+
+    for _, version_row in df_content_versions.iterrows():
+        content_version_id = version_row['Id']
+        file_title = version_row['Title']
+        file_extension = version_row['FileExtension']
+        version_data_path = f"/services/data/{api_version}/sobjects/ContentVersion/{content_version_id}/VersionData"
+        version_data_url = base_url + version_data_path
+
+        try:
+            response = oldsf.session.get(version_data_url, headers={'Authorization': 'Bearer ' + oldsf.session_id})
+            response.raise_for_status()
+
+            content_document_id = version_row['ContentDocumentId']
+            file_base, _ = os.path.splitext(file_title)
+            file_title_with_doc_id = f"{content_document_id}_{file_base}.{file_extension}"
+            file_path = os.path.join(download_dir, file_title_with_doc_id)
+
+            file_count = 1
+            while os.path.exists(file_path):
+                file_path = os.path.join(download_dir, f"{content_document_id}_{file_base}_{file_count}.{file_extension}")
+                file_count += 1
+
+            with open(file_path, 'wb') as file:
+                file.write(response.content)
+            print(f"Downloaded {file_title} as {file_title_with_doc_id} to {file_path}")
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to download {file_title} from {version_data_url}: {e}")
+
+# Function to download legacy Attachments
+def download_attachments():
+    query = """
+        SELECT Id, Name, Body, ParentId, ContentType
+        FROM Attachment
+    """
+    attachments = query_salesforce(oldsf, query)
+    df_attachments = pd.DataFrame(attachments)
+    if 'attributes' in df_attachments.columns:
+        df_attachments = df_attachments.drop(columns='attributes')
+
+    for _, attachment_row in df_attachments.iterrows():
+        attachment_id = attachment_row['Id']
+        attachment_name = attachment_row['Name']
+        parent_id = attachment_row['ParentId']
+        content_type = attachment_row['ContentType']
+        body_path = f"/services/data/{api_version}/sobjects/Attachment/{attachment_id}/Body"
+        body_url = base_url + body_path
+
+        try:
+            response = oldsf.session.get(body_url, headers={'Authorization': 'Bearer ' + oldsf.session_id})
+            response.raise_for_status()
+
+            file_base, file_extension = os.path.splitext(attachment_name)
+            file_title_with_parent = f"{parent_id}_{file_base}{file_extension}"
+            file_path = os.path.join(download_dir, file_title_with_parent)
+
+            file_count = 1
+            while os.path.exists(file_path):
+                file_path = os.path.join(download_dir, f"{parent_id}_{file_base}_{file_count}{file_extension}")
+                file_count += 1
+
+            with open(file_path, 'wb') as file:
+                file.write(response.content)
+            print(f"Downloaded {attachment_name} as {file_title_with_parent} to {file_path}")
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to download {attachment_name} from {body_url}: {e}")
+
+# Function to download Notes
+def download_notes():
+    query = """
+        SELECT Id, Title, Body, ParentId
+        FROM Note
+    """
+    notes = query_salesforce(oldsf, query)
+    df_notes = pd.DataFrame(notes)
+    if 'attributes' in df_notes.columns:
+        df_notes = df_notes.drop(columns='attributes')
+
+    for _, note_row in df_notes.iterrows():
+        note_id = note_row['Id']
+        note_title = note_row['Title']
+        parent_id = note_row['ParentId']
+        note_body = note_row['Body']
+
+        file_title_with_parent = f"{parent_id}_{note_title}.txt"
+        file_path = os.path.join(download_dir, file_title_with_parent)
+
+        file_count = 1
+        while os.path.exists(file_path):
+            file_path = os.path.join(download_dir, f"{parent_id}_{note_title}_{file_count}.txt")
+            file_count += 1
+
+        try:
+            with open(file_path, 'w', encoding='utf-8') as file:
+                file.write(note_body)
+            print(f"Downloaded note {note_title} as {file_title_with_parent} to {file_path}")
+        except Exception as e:
+            print(f"Failed to save note {note_title}: {e}")
+
+# Execute functions to download all content
+download_content_version()
+download_attachments()
+download_notes()
+
+
+
+
+
+
+
+
+
+
+                                       
+                                       
+  
