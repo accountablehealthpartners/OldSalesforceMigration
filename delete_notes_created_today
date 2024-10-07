@@ -1,0 +1,36 @@
+from simple_salesforce import Salesforce
+from datetime import datetime, timedelta
+import pytz
+
+# Define the EST timezone
+est = pytz.timezone('US/Eastern')
+
+# Get the current time in EST
+est_now = datetime.now(est)
+
+# Define the start and end of the day in EST
+today_start_est = est_now.replace(hour=0, minute=0, second=0, microsecond=0)
+today_end_est = est_now.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+# Convert EST times to UTC for the query
+today_start_utc = today_start_est.astimezone(pytz.utc).isoformat()[:-6] + 'Z'
+today_end_utc = today_end_est.astimezone(pytz.utc).isoformat()[:-6] + 'Z'
+
+# Step 1: Query for all notes created today in UTC based on EST time range
+query = f"""
+    SELECT Id, Title, CreatedDate 
+    FROM ContentNote 
+    WHERE CreatedDate >= {today_start_utc} AND CreatedDate <= {today_end_utc}
+"""
+notes_created_today = sand.query_all(query)
+note_ids = [note['Id'] for note in notes_created_today['records']]
+
+# Step 2: Delete the notes
+for note_id in note_ids:
+    try:
+        sand.ContentNote.delete(note_id)
+        print(f"Deleted Note with ID: {note_id}")
+    except Exception as e:
+        print(f"Failed to delete Note with ID {note_id}: {e}")
+
+print(f"Completed deletion of {len(note_ids)} notes created today in EST.")
